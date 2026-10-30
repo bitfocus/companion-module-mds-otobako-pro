@@ -32,9 +32,11 @@ const COLOR_RED = combineRgb(180, 0, 0)
 const COLOR_ORANGE = combineRgb(220, 120, 0)
 
 export default class OtobakoProInstance extends InstanceBase {
-	async init(config) {
+	async init(config, _isFirstInit, secrets) {
 		this.config = config
+		this.secrets = secrets
 		this.lastStatus = null
+		this.lastVariables = null
 		this.updateStatus(InstanceStatus.Connecting)
 		this.buildDefinitions()
 		this.startPolling()
@@ -44,8 +46,9 @@ export default class OtobakoProInstance extends InstanceBase {
 		this.stopPolling()
 	}
 
-	async configUpdated(config) {
+	async configUpdated(config, secrets) {
 		this.config = config
+		this.secrets = secrets
 		this.startPolling()
 	}
 
@@ -91,7 +94,8 @@ export default class OtobakoProInstance extends InstanceBase {
 				max: 65535,
 			},
 			{
-				type: 'textinput',
+				// ★ secret-text は Companion の秘密情報側に保存される＝値は init / configUpdated の secrets で届く。
+				type: 'secret-text',
 				id: 'token',
 				label: 'Token / トークン',
 				tooltip: 'Shown in "External Control" in otobako Pro. / 音箱 Pro の「外部制御」画面に表示されます。',
@@ -111,38 +115,38 @@ export default class OtobakoProInstance extends InstanceBase {
 			go: {
 				name: 'GO (play and advance) / GO（再生して次へ）',
 				options: [],
-				callback: async () => this.send('/go'),
+				callback: async (_action, context) => this.send('/go', context.signal),
 			},
 			stop: {
 				name: 'Stop / 停止',
 				options: [],
-				callback: async () => this.send('/stop'),
+				callback: async (_action, context) => this.send('/stop', context.signal),
 			},
 			// フェードの長さは音箱 Pro 側の設定（「本番」メニュー）。フェード中にもう一度送るとすぐ止まる（#0062）。
 			fade_out: {
 				name: 'Fade out and stop / フェードアウトして停止',
 				options: [],
-				callback: async () => this.send('/fade-out'),
+				callback: async (_action, context) => this.send('/fade-out', context.signal),
 			},
 			stop_all: {
 				name: 'Stop all (incl. SE) / すべて停止（SE 含む）',
 				options: [],
-				callback: async () => this.send('/stop-all'),
+				callback: async (_action, context) => this.send('/stop-all', context.signal),
 			},
 			next: {
 				name: 'Next cue (no playback) / 次の曲へ（鳴らさない）',
 				options: [],
-				callback: async () => this.send('/next'),
+				callback: async (_action, context) => this.send('/next', context.signal),
 			},
 			prev: {
 				name: 'Previous cue (no playback) / 前の曲へ（鳴らさない）',
 				options: [],
-				callback: async () => this.send('/prev'),
+				callback: async (_action, context) => this.send('/prev', context.signal),
 			},
 			pad: {
 				name: 'Play pad / パッドを鳴らす',
 				options: [{ type: 'dropdown', id: 'pad', label: 'Pad / パッド番号', default: 1, choices: padChoices }],
-				callback: async (action) => this.send(`/pad/${Number(action.options.pad) || 1}`),
+				callback: async (action, context) => this.send(`/pad/${Number(action.options.pad) || 1}`, context.signal),
 			},
 		})
 
@@ -273,7 +277,8 @@ export default class OtobakoProInstance extends InstanceBase {
 	buildURL(path) {
 		const host = (this.config?.host || '').trim()
 		const port = Number(this.config?.port) || 8737
-		const token = this.config?.token || ''
+		// ⚠️ ダイアログからのコピーでは末尾に空白が付きやすい（ホストと同じく無視する）。
+		const token = (this.secrets?.token || '').trim()
 		if (!host || !token) return null
 		return `http://${host}:${port}${path}?token=${encodeURIComponent(token)}`
 	}
@@ -283,14 +288,16 @@ export default class OtobakoProInstance extends InstanceBase {
 	 * ⚠️ 409（not available）は**異常ではない**（例: リスト表示でパッドを叩いた）。
 	 *    接続を落とさず、理由だけログに出す。
 	 */
-	async send(path) {
+	async send(path, signal) {
 		const url = this.buildURL(path)
 		if (!url) {
 			this.updateStatus(InstanceStatus.BadConfig, 'Set the address and token / IP とトークンを設定してください')
 			return
 		}
 		try {
-			const response = await this.fetchWithTimeout(url)
+			const response = await this.fetchWithTimeout(url, signal)
+			// 応答は status しか見ない。本文を捨てて接続をすぐ返す。
+			await response.body?.cancel().catch(() => {})
 			if (response.status === 401) {
 				this.updateStatus(InstanceStatus.AuthenticationFailure, 'Invalid token / トークンが違います')
 				return
@@ -308,18 +315,23 @@ export default class OtobakoProInstance extends InstanceBase {
 			}
 			this.updateStatus(InstanceStatus.Ok)
 		} catch (error) {
-			this.updateStatus(InstanceStatus.ConnectionFailure, String(error?.message ?? error))
+			// 操作が中止されただけなら、接続の失敗として扱わない。
+			if (signal?.aborted) return
+			this.updateStatus(InstanceStatus.ConnectionFailure, this.describeError(error))
 		}
 	}
 
-	async fetchWithTimeout(url) {
-		const controller = new AbortController()
-		const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT)
-		try {
-			return await fetch(url, { signal: controller.signal })
-		} finally {
-			clearTimeout(timer)
+	async fetchWithTimeout(url, signal) {
+		const timeout = AbortSignal.timeout(REQUEST_TIMEOUT)
+		return fetch(url, { signal: signal ? AbortSignal.any([signal, timeout]) : timeout })
+	}
+
+	/** 接続失敗の理由。⚠️ fetch の message は常に "fetch failed" で、本当の理由は cause にある。 */
+	describeError(error) {
+		if (error?.name === 'TimeoutError') {
+			return `Timeout (no reply from ${this.config?.host}:${this.config?.port}) / 応答がありません`
 		}
+		return String(error?.cause?.code ?? error?.cause?.message ?? error?.message ?? error)
 	}
 
 	// MARK: 状態の取得
@@ -347,6 +359,7 @@ export default class OtobakoProInstance extends InstanceBase {
 		}
 		try {
 			const response = await this.fetchWithTimeout(url)
+			if (!response.ok) await response.body?.cancel().catch(() => {})
 			if (response.status === 401) {
 				this.updateStatus(InstanceStatus.AuthenticationFailure, 'Invalid token / トークンが違います')
 				return
@@ -359,7 +372,7 @@ export default class OtobakoProInstance extends InstanceBase {
 			this.applyStatus(status)
 			this.updateStatus(InstanceStatus.Ok)
 		} catch (error) {
-			this.updateStatus(InstanceStatus.ConnectionFailure, String(error?.message ?? error))
+			this.updateStatus(InstanceStatus.ConnectionFailure, this.describeError(error))
 			this.applyStatus(null)
 		}
 	}
@@ -368,11 +381,17 @@ export default class OtobakoProInstance extends InstanceBase {
 		const changed =
 			this.lastStatus?.isPlaying !== status?.isPlaying || this.lastStatus?.isFadingOut !== status?.isFadingOut
 		this.lastStatus = status
-		this.setVariableValues({
+		const variables = {
 			playing: status?.playing ?? '',
 			standby: status?.standby ?? '',
 			se_count: status?.seCount ?? 0,
-		})
+		}
+		// 変わった値だけ送る（500ms ごとに同じ値を送り続けない）。
+		const changedVariables = Object.fromEntries(
+			Object.entries(variables).filter(([id, value]) => this.lastVariables?.[id] !== value),
+		)
+		this.lastVariables = variables
+		if (Object.keys(changedVariables).length > 0) this.setVariableValues(changedVariables)
 		// 変わったときだけ再評価する（500ms ごとに全フィードバックを回さない）。
 		if (changed) this.checkFeedbacks('is_playing', 'is_fading_out')
 	}

@@ -84,7 +84,7 @@ Bitfocus の公式テンプレート（companion-module-template-js）と同じ�
 
 ```bash
 corepack yarn install
-corepack yarn test      # node --test
+corepack yarn test      # node --test (src/main.test.js)
 corepack yarn format    # prettier。差分が出ない状態で出す（CI が見る）
 corepack yarn package   # mds-otobako-pro-<version>.tgz を作る
 ```

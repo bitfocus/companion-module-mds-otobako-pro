@@ -5,10 +5,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
-import validate from './node_modules/@companion-module/base/generated/validate_manifest.js'
-import Instance from './src/main.js'
+import validate from '../node_modules/@companion-module/base/generated/validate_manifest.js'
+import Instance from './main.js'
 
-const manifest = JSON.parse(fs.readFileSync(new URL('./companion/manifest.json', import.meta.url), 'utf8'))
+const manifest = JSON.parse(fs.readFileSync(new URL('../companion/manifest.json', import.meta.url), 'utf8'))
 
 test('manifest が Companion の検証を通る', () => {
 	// ⚠️ ここが崩れると Companion がモジュールを一切読み込まず、原因が分かりにくい。
@@ -16,7 +16,7 @@ test('manifest が Companion の検証を通る', () => {
 })
 
 test('entrypoint が実在する', () => {
-	const entry = new URL(`./companion/${manifest.runtime.entrypoint}`, import.meta.url)
+	const entry = new URL(`../companion/${manifest.runtime.entrypoint}`, import.meta.url)
 	assert.ok(fs.existsSync(entry), `${manifest.runtime.entrypoint} が見つからない`)
 })
 
@@ -30,12 +30,12 @@ test('既定ポートが音箱 Pro 側と一致している', () => {
 test('URL の組み立て＝トークンは必ず付き、未設定なら作らない', () => {
 	const build = Instance.prototype.buildURL
 	assert.equal(
-		build.call({ config: { host: '10.0.0.2', port: 8737, token: 'abc' } }, '/go'),
+		build.call({ config: { host: '10.0.0.2', port: 8737 }, secrets: { token: 'abc' } }, '/go'),
 		'http://10.0.0.2:8737/go?token=abc',
 	)
 	// ⚠️ 未設定のまま叩きに行かない（無意味な接続失敗でログを埋めない）。
-	assert.equal(build.call({ config: { host: '', token: 'abc' } }, '/go'), null)
-	assert.equal(build.call({ config: { host: '10.0.0.2', token: '' } }, '/go'), null)
+	assert.equal(build.call({ config: { host: '' }, secrets: { token: 'abc' } }, '/go'), null)
+	assert.equal(build.call({ config: { host: '10.0.0.2' }, secrets: { token: '' } }, '/go'), null)
 })
 
 test('ホスト名（.local）でも接続先を組み立てられる', () => {
@@ -43,7 +43,7 @@ test('ホスト名（.local）でも接続先を組み立てられる', () => {
 	//   ⚠️ 検証の regex（Regex.HOSTNAME）が IP しか通さなくなると、この入力ができなくなる。
 	const build = Instance.prototype.buildURL
 	assert.equal(
-		build.call({ config: { host: 'MyMac.local', port: 8737, token: 'abc' } }, '/go'),
+		build.call({ config: { host: 'MyMac.local', port: 8737 }, secrets: { token: 'abc' } }, '/go'),
 		'http://MyMac.local:8737/go?token=abc',
 	)
 
@@ -56,13 +56,63 @@ test('ホスト名（.local）でも接続先を組み立てられる', () => {
 })
 
 test('トークンは URL エスケープされる', () => {
-	const url = Instance.prototype.buildURL.call({ config: { host: 'h', port: 1, token: 'a b&c' } }, '/go')
+	const url = Instance.prototype.buildURL.call({ config: { host: 'h', port: 1 }, secrets: { token: 'a b&c' } }, '/go')
 	assert.ok(url.endsWith('token=a%20b%26c'), url)
+})
+
+test('トークンの前後の空白は無視される', () => {
+	// ⚠️ ダイアログからのコピーでは末尾に空白が付きやすい。見た目は正しいのに認証失敗になる。
+	const url = Instance.prototype.buildURL.call({ config: { host: 'h', port: 1 }, secrets: { token: ' abc ' } }, '/go')
+	assert.ok(url.endsWith('token=abc'), url)
+})
+
+test('トークンは secret-text で持つ', () => {
+	// ⚠️ textinput に戻すと設定の書き出しにトークンが平文で載る。
+	const field = Instance.prototype.getConfigFields.call({}).find((f) => f.id === 'token')
+	assert.equal(field.type, 'secret-text')
+})
+
+test('接続失敗の理由が設定のどこを直すか分かる形になる', () => {
+	const describe = (error) => Instance.prototype.describeError.call({ config: { host: 'h', port: 1 } }, error)
+	const refused = new TypeError('fetch failed', { cause: { code: 'ECONNREFUSED' } })
+	assert.equal(describe(refused), 'ECONNREFUSED')
+	assert.match(describe(new DOMException('timed out', 'TimeoutError')), /h:1/)
+	assert.equal(describe(new Error('boom')), 'boom')
+})
+
+test('中止された操作は接続失敗にしない', async () => {
+	const statuses = []
+	const controller = new AbortController()
+	controller.abort()
+	const stub = {
+		config: { host: 'h', port: 1 },
+		secrets: { token: 'abc' },
+		buildURL: Instance.prototype.buildURL,
+		fetchWithTimeout: Instance.prototype.fetchWithTimeout,
+		updateStatus: (...args) => statuses.push(args),
+	}
+	await Instance.prototype.send.call(stub, '/go', controller.signal)
+	assert.deepEqual(statuses, [])
+})
+
+test('変数は変わったものだけ送る', () => {
+	// 500ms ごとのポーリングで同じ値を送り続けない。
+	const sent = []
+	const stub = {
+		lastStatus: null,
+		setVariableValues: (values) => sent.push(values),
+		checkFeedbacks() {},
+	}
+	const apply = (status) => Instance.prototype.applyStatus.call(stub, status)
+	apply({ playing: 'A', standby: 'B', seCount: 0 })
+	apply({ playing: 'A', standby: 'B', seCount: 0 })
+	apply({ playing: 'A', standby: 'C', seCount: 0 })
+	assert.deepEqual(sent, [{ playing: 'A', standby: 'B', se_count: 0 }, { standby: 'C' }])
 })
 
 test('パッドは9本で音箱 Pro 側と揃っている', () => {
 	// 音箱 Pro: performancePadCount = 9
-	const src = fs.readFileSync(new URL('./src/main.js', import.meta.url), 'utf8')
+	const src = fs.readFileSync(new URL('./main.js', import.meta.url), 'utf8')
 	assert.match(src, /const PAD_COUNT = 9/)
 })
 
