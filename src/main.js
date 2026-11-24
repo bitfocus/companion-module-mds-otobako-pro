@@ -14,6 +14,10 @@
 //
 
 import { InstanceBase, InstanceStatus, Regex, combineRgb } from '@companion-module/base'
+import { UpgradeScripts } from './upgrades.js'
+
+// Companion は入口の `default`（このクラス）と `UpgradeScripts` を読む。
+export { UpgradeScripts }
 
 /** パッド番号の本数。音箱 Pro 側の performancePadCount と揃える。 */
 const PAD_COUNT = 9
@@ -360,12 +364,16 @@ export default class OtobakoProInstance extends InstanceBase {
 		try {
 			const response = await this.fetchWithTimeout(url)
 			if (!response.ok) await response.body?.cancel().catch(() => {})
+			// ⚠️ 状態が読めないときは、点灯と変数も消す（通信の失敗と同じ扱い）。
+			//    消さないと、トークン違いやエラー応答のあいだ、最後に読めた「再生中」でボタンが光り続ける。
 			if (response.status === 401) {
 				this.updateStatus(InstanceStatus.AuthenticationFailure, 'Invalid token / トークンが違います')
+				this.applyStatus(null)
 				return
 			}
 			if (!response.ok) {
 				this.updateStatus(InstanceStatus.ConnectionFailure, `HTTP ${response.status}`)
+				this.applyStatus(null)
 				return
 			}
 			const status = await response.json()

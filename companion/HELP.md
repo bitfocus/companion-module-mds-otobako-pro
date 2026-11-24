@@ -49,7 +49,9 @@ Pads only play while otobako Pro shows the pad or split view. In list view the a
 
 - Feedback **Playing**: changes the button style while otobako Pro is playing.
 - Feedback **Fading out**: changes the button style while otobako Pro is fading out.
-- Variables: `$(otobako:playing)` (playing cue), `$(otobako:standby)` (cue that GO will play next), `$(otobako:se_count)` (number of sound effects playing).
+- Variables: `$(<connection name>:playing)` (playing cue), `$(<connection name>:standby)` (cue that GO will play next), `$(<connection name>:se_count)` (number of sound effects playing).
+  Replace `<connection name>` with the name of your connection on the Connections page. For example, with the default name `otobako_Pro`: `$(otobako_Pro:playing)`.
+  The presets already use the right name, so you only need this when you write button text yourself.
 
 The module polls otobako Pro's status every 500 ms.
 
@@ -70,3 +72,4 @@ macOS の音響オペレーター卓「音箱 Pro」を、Companion からネッ
 - **Buttons → Presets → otobako Pro** から「Transport / 本番操作」と「Pads / パッド」をボタンへドラッグすれば卓が組めます。
 - Stream Deck を使う場合は、Elgato 純正アプリを終了してください（同じ機器を取り合います）。
 - パッドは音箱 Pro がパッド表示か分割表示のときだけ鳴ります。
+- 変数は `$(接続の名前:playing)`（再生中の曲）・`$(接続の名前:standby)`（次に GO で鳴る曲）・`$(接続の名前:se_count)`（鳴っている SE の数）です。接続の名前は Connections の画面に出ている名前に置き換えてください（既定の名前なら `$(otobako_Pro:playing)`）。プリセットは自動で合わせてあるので、ボタンの文字を自分で書くときだけ必要です。

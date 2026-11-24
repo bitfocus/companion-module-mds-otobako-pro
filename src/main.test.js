@@ -1,12 +1,12 @@
 //
-//  test.js — モジュールの「壊れていたら気づけない」部分だけを固定する。
+//  main.test.js — モジュールの「壊れていたら気づけない」部分だけを固定する。
 //  `node --test` で走る（Companion 本体は要らない）。
 //
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import validate from '../node_modules/@companion-module/base/generated/validate_manifest.js'
-import Instance from './main.js'
+import Instance, * as entry from './main.js'
 
 const manifest = JSON.parse(fs.readFileSync(new URL('../companion/manifest.json', import.meta.url), 'utf8'))
 
@@ -64,6 +64,27 @@ test('トークンの前後の空白は無視される', () => {
 	// ⚠️ ダイアログからのコピーでは末尾に空白が付きやすい。見た目は正しいのに認証失敗になる。
 	const url = Instance.prototype.buildURL.call({ config: { host: 'h', port: 1 }, secrets: { token: ' abc ' } }, '/go')
 	assert.ok(url.endsWith('token=abc'), url)
+	// 改行も同じ（複数行の選択からのコピー）。
+	const url2 = Instance.prototype.buildURL.call({ config: { host: 'h', port: 1 }, secrets: { token: 'abc\n' } }, '/go')
+	assert.ok(url2.endsWith('token=abc'), url2)
+})
+
+test('空白だけのトークンは未設定として扱う', () => {
+	// 叩きに行っても必ず 401 になる。未設定（BadConfig）として案内した方が直し方が分かる。
+	assert.equal(
+		Instance.prototype.buildURL.call({ config: { host: 'h', port: 1 }, secrets: { token: '   ' } }, '/go'),
+		null,
+	)
+})
+
+test('トークンは secrets からだけ読む（config.token は使わない）', () => {
+	// ⚠️ v1.1.1 で secret-text に移した。config 側に古い値が残っていても、それで叩きに行かない
+	//    （設定の書き出しに載る側の値を使い続けることになる）。
+	assert.equal(Instance.prototype.buildURL.call({ config: { host: 'h', port: 1, token: 'abc' } }, '/go'), null)
+	assert.equal(
+		Instance.prototype.buildURL.call({ config: { host: 'h', port: 1, token: 'abc' }, secrets: {} }, '/go'),
+		null,
+	)
 })
 
 test('トークンは secret-text で持つ', () => {
@@ -108,6 +129,40 @@ test('変数は変わったものだけ送る', () => {
 	apply({ playing: 'A', standby: 'B', seCount: 0 })
 	apply({ playing: 'A', standby: 'C', seCount: 0 })
 	assert.deepEqual(sent, [{ playing: 'A', standby: 'B', se_count: 0 }, { standby: 'C' }])
+})
+
+test('状態が読めない応答（401・エラー）では点灯と変数を消す', async () => {
+	// ⚠️ 通信の失敗のときだけ消していた（v1.1.1 の審査の L1）。トークン違いやエラー応答のあいだ、
+	//    最後に読めた「再生中」でボタンが光り続け、卓の表示が実際と食い違う。
+	for (const status of [401, 500, 404]) {
+		const statuses = []
+		const sent = []
+		const checked = []
+		const stub = {
+			config: { host: 'h', port: 1 },
+			secrets: { token: 'abc' },
+			buildURL: Instance.prototype.buildURL,
+			fetchWithTimeout: async () => ({ ok: false, status, body: null }),
+			updateStatus: (...args) => statuses.push(args[0]),
+			applyStatus: Instance.prototype.applyStatus,
+			setVariableValues: (values) => sent.push(values),
+			checkFeedbacks: (...ids) => checked.push(...ids),
+			lastStatus: { isPlaying: true, isFadingOut: false, playing: 'A', standby: 'B', seCount: 1 },
+			lastVariables: { playing: 'A', standby: 'B', se_count: 1 },
+		}
+		await Instance.prototype.poll.call(stub)
+		assert.equal(statuses.length, 1, `HTTP ${status}`)
+		assert.equal(stub.lastStatus, null, `HTTP ${status}: 状態が残っている`)
+		assert.deepEqual(sent, [{ playing: '', standby: '', se_count: 0 }], `HTTP ${status}: 変数が消えていない`)
+		assert.ok(checked.includes('is_playing'), `HTTP ${status}: フィードバックを再評価していない`)
+	}
+})
+
+test('UpgradeScripts を入口から書き出している', () => {
+	// ★ Companion は入口の `default` と `UpgradeScripts` を読む（無ければ空として扱う）。
+	//   今は空。id を変えるときに src/upgrades.js の末尾へ足す。
+	assert.ok(Array.isArray(entry.UpgradeScripts))
+	assert.equal(entry.default, Instance)
 })
 
 test('パッドは9本で音箱 Pro 側と揃っている', () => {
